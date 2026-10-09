@@ -1,0 +1,90 @@
+# Daily AvBuyer market feed + GitHub Pages deployment for Aircraft Comparison V1.0
+#
+# schedule          : every day at 06:17 UTC (08:17 Brussels in summer, 07:17 in winter)
+# workflow_dispatch : "Run workflow" button in the Actions tab
+# push to main      : a new index.html (or any other change) is published straight away,
+#                     without running the scraper
+#
+# Only index.html and market_data.js are published on the website.
+# The scraper, its registration cache and the daily history stay in the repository only.
+
+name: Market feed and website
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: market-feed
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Collect AvBuyer listings
+        run: |
+          set +e
+          python scripts/avbuyer_feed.py --out market_data.js --gzip-history --max-seconds 1200
+          rc=$?
+          set -e
+          if [ "$rc" = "1" ]; then
+            echo "::error::Market feed NOT updated: crawl incomplete or listing count dropped more than 20%. The previous market_data.js is kept."
+            exit 1
+          fi
+          if [ "$rc" = "2" ]; then
+            echo "::warning::Some registrations are still pending; they are fetched on the next run."
+          fi
+
+      - name: Commit the new data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add market_data.js scripts/reg_cache.json scripts/history
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "Market feed $(date -u +%Y-%m-%d)"
+          git push
+
+  deploy:
+    needs: update
+    if: always() && (needs.update.result == 'success' || needs.update.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Build the site folder
+        run: |
+          mkdir _site
+          cp index.html market_data.js _site/
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+      - id: deployment
+        uses: actions/deploy-pages@v5
